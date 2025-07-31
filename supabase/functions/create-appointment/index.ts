@@ -50,134 +50,11 @@ try {
     details: error.message
   }));
 }
-serve(async (req)=>{
-  if (req.method === "OPTIONS") {
-    return new Response("ok", {
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Max-Age": "86400"
-      }
-    });
-  }
-  if (req.method !== "POST") {
-    return createErrorResponse("Method not allowed", 405);
-  }
-  const supabaseUrl = Deno.env.get("SUPABASE_URL");
-  const supabaseServiceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-  if (!supabaseUrl || !supabaseServiceRoleKey) {
-    return createErrorResponse("Server configuration error", 500);
-  }
-  const supabase = createClient(supabaseUrl, supabaseServiceRoleKey);
-  try {
-    // Parse and validate request body
-    let body;
-    try {
-      body = await req.json();
-    } catch (error) {
-      return createErrorResponse("Invalid JSON in request body", 400, error.message);
-    }
-    const { email, fullName, message, phone, schedule, gender = "other", date_of_birth, doctor_id, preferred_date, preferred_time, preferred_slot_id, visit_type = "consultation" } = body;
-    // Validation
-    if (!fullName || !message || !schedule || !phone || !date_of_birth) {
-      return createErrorResponse("Missing required fields: fullName, message, schedule, date_of_birth, phone", 400);
-    }
-    if (email) {
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      if (!emailRegex.test(email)) {
-        return createErrorResponse("Invalid email format", 400);
-      }
-    }
-    const phoneRegex = /^\+?[1-9]\d{1,14}$/;
-    if (!phoneRegex.test(phone)) {
-      return createErrorResponse("Invalid phone number format (e.g., +8434567890)", 400);
-    }
-    if (preferred_time) {
-      const timeRegex = /^([01]\d|2[0-3]):[0-5]\d:00$/;
-      if (!timeRegex.test(preferred_time)) {
-        return createErrorResponse("Invalid preferred_time format (e.g., 09:00:00)", 400);
-      }
-    }
-    try {
-      const dob = new Date(date_of_birth);
-      if (isNaN(dob.getTime()) || dob > new Date()) {
-        return createErrorResponse("Invalid date_of_birth: must be a valid date in the past", 400);
-      }
-    } catch  {
-      return createErrorResponse("Invalid date_of_birth format", 400);
-    }
-    // Schedule time ranges
-    const scheduleTimeRanges = {
-      Morning: {
-        start: "08:00:00",
-        end: "12:00:00"
-      },
-      Afternoon: {
-        start: "13:00:00",
-        end: "17:00:00"
-      },
-      Evening: {
-        start: "18:00:00",
-        end: "22:00:00"
-      }
-    };
-    const timeRange = scheduleTimeRanges[schedule];
-    if (!timeRange) {
-      return createErrorResponse("Invalid schedule value. Use: Morning, Afternoon, or Evening", 400);
-    }
-    const now = new Date();
-    const offsetMs = 7 * 60 * 60 * 1000; // +07:00 offset
-    const targetDate = preferred_date ? new Date(preferred_date).toISOString().split("T")[0] : new Date(now.getTime() + offsetMs).toISOString().split("T")[0];
-    if (!doctor_id) {
-      return createErrorResponse("Doctor selection is required. Please choose a doctor for your appointment.", 400, {
-        schedule,
-        date: targetDate,
-        time_range: timeRange,
-        suggestion: "Please select a doctor from the available doctors list"
-      });
-    }
-    let selectedSlot = null;
-    let bookedSlotInfo = null;
-    // Validate doctor
     const { data: doctor, error: doctorError } = await supabase.from("doctor_details").select("doctor_id").eq("doctor_id", doctor_id).single();
     if (doctorError || !doctor) {
-      console.log(JSON.stringify({
-        level: "error",
-        message: "Doctor validation error",
-        details: doctorError?.message
-      }));
-      return createErrorResponse("Invalid doctor selection. Please choose a valid doctor.", 400, {
-        doctor_id,
-        suggestion: "Please select a doctor from the available doctors list"
-      });
-    }
-    // Fetch available slots
-    console.log(JSON.stringify({
-      level: "info",
-      message: "Calling get_available_slots",
-      params: {
-        p_doctor_id: doctor_id,
-        p_slot_date: targetDate,
-        p_start_time: timeRange.start,
-        p_end_time: timeRange.end,
-        p_slot_id: preferred_slot_id || null
-      }
-    }));
-    const { data: availableSlots, error: slotCheckError } = await supabase.rpc("get_available_slots", {
-      p_doctor_id: doctor_id,
-      p_slot_date: targetDate,
-      p_start_time: timeRange.start,
-      p_end_time: timeRange.end,
-      p_slot_id: preferred_slot_id || null
-    });
-    if (slotCheckError) {
-      console.log(JSON.stringify({
-        level: "error",
-        message: "Slot check error",
-        details: slotCheckError.message
-      }));
-      return createErrorResponse("Failed to check doctor availability", 500, slotCheckError.message);
+    // Validate the selected doctor
+    const { data: doctor, error: doctorError } = await supabase.from("doctor_details").select("doctor_id").eq("doctor_id", doctor_id).single();
+    if (doctorError || !doctor) {
     }
     if (!availableSlots || availableSlots.length === 0) {
       console.log(JSON.stringify({
@@ -270,235 +147,50 @@ serve(async (req)=>{
       }));
       return createErrorResponse("Failed to verify booked slot", 500, verifyError?.message || "Slot not found");
     }
-    if (bookedSlot.appointments_count >= bookedSlot.max_appointments) {
-      return createErrorResponse("Slot is already full", 400, "This slot has reached the maximum number of appointments");
     }
-    bookedSlotInfo = {
-      doctor_slot_id: selectedSlot.doctor_slot_id,
-      slot_date: selectedSlot.slot_date,
-      slot_time: selectedSlot.slot_time,
-      doctor_id: selectedSlot.doctor_id,
-      schedule
-    };
-    // Patient/Guest Logic
-    let patientId = null;
-    let newAppointment = null;
-    if (email) {
-      const { data: patient_email, error: patientError } = await supabase.from("patients").select("id").eq("email", email).maybeSingle();
-      if (patientError && patientError.code !== "PGRST116") {
-        console.log(JSON.stringify({
-          level: "error",
-          message: "Email query error",
-          details: {
-            code: patientError.code,
-            message: patientError.message
-          }
-        }));
-        return createErrorResponse("Failed to check existing patient with email", 500, patientError.message);
-      }
-      if (patient_email) {
-        patientId = patient_email.id;
-      }
-    }
-    if (!patientId) {
-      const { data: patient, error: phoneError } = await supabase.from("patients").select("id").eq("phone", phone).maybeSingle();
-      if (phoneError && phoneError.code !== "PGRST116") {
-        console.log(JSON.stringify({
-          level: "error",
-          message: "Phone query error",
-          details: {
-            code: phoneError.code,
-            message: phoneError.message
-          }
-        }));
-        return createErrorResponse("Failed to check existing patient with phone", 500, phoneError.message);
-      }
-      if (patient) {
-        patientId = patient.id;
-      }
-    }
-    const guestId = crypto.randomUUID();
-    if (!patientId) {
-      const { data: existingGuest, error: guestCheckError } = await supabase.from("guests").select("guest_id").eq("phone", phone).maybeSingle();
-      if (guestCheckError && guestCheckError.code !== "PGRST116") {
-        console.log(JSON.stringify({
-          level: "error",
-          message: "Guest check error",
-          details: guestCheckError.message
-        }));
-        await supabase.rpc("cancel_appointment_slot", {
-          p_slot_id: selectedSlot.doctor_slot_id
-        });
-        return createErrorResponse("Failed to check existing guest", 500, guestCheckError.message);
-      }
-      if (existingGuest) {
-        guestId = existingGuest.guest_id;
-      } else {
-        const { error: guestError } = await supabase.from("guests").insert({
-          guest_id: guestId,
-          email: email || `${phone}@placeholder.com`,
-          phone,
-          gender,
-          date_of_birth,
-          created_at: new Date().toISOString(),
-          full_name: fullName
-        });
-        if (guestError) {
-          console.log(JSON.stringify({
-            level: "error",
-            message: "Guest creation error",
-            details: guestError.message
-          }));
-          await supabase.rpc("cancel_appointment_slot", {
-            p_slot_id: selectedSlot.doctor_slot_id
-          });
-          return createErrorResponse("Failed to create guest", 500, guestError.message);
+    if (!availableSlots || availableSlots.length === 0) {
+      console.log(JSON.stringify({
+        level: "warn",
+        message: "No available slots found for doctor",
+        details: {
+          doctor_id,
+          targetDate,
+          schedule
         }
-      }
-      // Create Guest Appointment
-      const { data, error: appointmentError } = await supabase.from("guest_appointments").insert({
-        guest_appointment_id: crypto.randomUUID(),
-        guest_id: guestId,
-        phone,
-        email: email || `${phone}@placeholder.com`,
-        message,
-        visit_type,
-        schedule,
-        appointment_status: "pending",
-        doctor_id: doctor_id,
-        slot_id: selectedSlot.doctor_slot_id,
-        appointment_date: bookedSlotInfo.slot_date,
-        appointment_time: bookedSlotInfo.slot_time,
-        preferred_date: preferred_date || null,
-        preferred_time: preferred_time || null,
-        created_at: new Date().toISOString()
-      }).select(`
-        guest_appointment_id,
-        guest_id,
-        visit_type,
-        appointment_status,
-        schedule,
-        message,
+      }));
+      return createErrorResponse(`The selected doctor is not available for ${schedule} schedule on ${targetDate}. Please choose a different doctor, date, or time.`, 400, {
         doctor_id,
-        slot_id,
-        appointment_date,
-        appointment_time,
-        preferred_date,
-        preferred_time,
-        created_at
-      `).single();
-      if (appointmentError) {
-        console.log(JSON.stringify({
-          level: "error",
-          message: "Guest appointment insert error",
-          details: {
-            code: appointmentError.code,
-            message: appointmentError.message
-          }
-        }));
-        await supabase.rpc("cancel_appointment_slot", {
-          p_slot_id: selectedSlot.doctor_slot_id
+        schedule
         });
-        return createErrorResponse("Failed to create guest appointment", 500, appointmentError.message);
       }
-      newAppointment = data;
-    } else {
-      // Create Patient Appointment
-      const { data, error: appointmentError } = await supabase.from("appointments").insert({
-        appointment_id: crypto.randomUUID(),
-        patient_id: patientId,
-        phone,
-        email: email || `${phone}@placeholder.com`,
-        message,
-        visit_type,
-        schedule,
-        appointment_status: "pending",
-        doctor_id: doctor_id,
-        slot_id: selectedSlot.doctor_slot_id,
-        appointment_date: bookedSlotInfo.slot_date,
-        appointment_time: bookedSlotInfo.slot_time,
-        preferred_date: preferred_date || null,
-        preferred_time: preferred_time || null,
-        created_at: new Date().toISOString()
-      }).select(`
-        appointment_id,
-        patient_id,
-        visit_type,
-        appointment_status,
-        schedule,
-        message,
-        doctor_id,
-        slot_id,
-        appointment_date,
-        appointment_time,
-        preferred_date,
-        preferred_time,
-        created_at,
-        patients (
-          full_name,
-          date_of_birth,
-          gender
-        )
-      `).single();
-      if (appointmentError) {
-        console.log(JSON.stringify({
-          level: "error",
-          message: "Patient appointment insert error",
-          details: {
-            code: appointmentError.code,
-            message: appointmentError.message
-          }
-        }));
-        await supabase.rpc("cancel_appointment_slot", {
-          p_slot_id: selectedSlot.doctor_slot_id
         });
-        return createErrorResponse("Failed to create patient appointment", 500, appointmentError.message);
       }
-      newAppointment = data;
     }
-    //cznie
-    // Fetch staff schedules for notifications
-    const { data: staffSchedules, error: scheduleError } = await supabase.from("staff_schedules").select(`
-      staff_id,
-      start_time,
-      end_time,
-      timetable,
-      staff_members (
-        full_name,
-        working_email,
-        role
-      )
-    `);
-    if (scheduleError) {
+
       console.log(JSON.stringify({
         level: "error",
-        message: "Staff schedule error",
-        details: scheduleError.message
+        message: "Slot booking error",
+        details: bookError?.message
       }));
-      return createErrorResponse("Failed to fetch staff schedules", 500, scheduleError.message);
+      return createErrorResponse("Failed to book the appointment slot", 500, bookError?.message);
     }
-    if (!staffSchedules || staffSchedules.length === 0) {
-      return createSuccessResponse({
-        success: true,
-        message: "Appointment created, but no staff available to notify",
-        data: {
-          appointment: newAppointment,
-          slot_info: bookedSlotInfo
-        }
-      });
+    // Fix 4: Verify slot booking
+    const { data: bookedSlot, error: verifyError } = await supabase.from("doctor_slot_assignments").select("appointments_count, max_appointments").eq("doctor_slot_id", selectedSlot.doctor_slot_id).single();
+    if (verifyError || !bookedSlot) {
+      console.log(JSON.stringify({
+        level: "error",
+        message: "Slot verification failed",
+        details: verifyError?.message || "Slot not found"
+      }));
+      return createErrorResponse("Failed to verify booked slot", 500, verifyError?.message || "Slot not found");
     }
-    const relevantStaff = staffSchedules.filter((schedule)=>schedule.staff_members?.role === "receptionist" || schedule.staff_members?.role === "doctor");
-    if (relevantStaff.length === 0) {
-      return createSuccessResponse({
-        success: true,
-        message: "Appointment created, but no eligible staff to notify",
-        data: {
-          appointment: newAppointment,
-          slot_info: bookedSlotInfo
-        }
-      });
-    }
-    // Redis Notification Logic
+   // Fix 5: Check for existing guest by phone
+        guestId = existingGuest.guest_id;
+      } else {
+        // Use existing guest ID
+        guestId = existingGuest.guest_id;
+      } else {
+    // Fetch staff schedules for notifications
     if (redis) {
       const isGuest = !!newAppointment.guest_appointment_id;
       const notificationChannel = "appointment_notifications";
@@ -651,12 +343,3 @@ serve(async (req)=>{
         }
       });
     }
-  } catch (error) {
-    console.error(JSON.stringify({
-      level: "error",
-      message: "Unexpected error in request handling",
-      details: error.message
-    }));
-    return createErrorResponse("Unexpected server error", 500, error.message);
-  }
-});
