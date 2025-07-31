@@ -191,7 +191,7 @@ begin
 end;
 $$;
 
-create or replace function fetch_slot_by_doctor-id(p_doctor_id uuid)
+create or replace function fetch_slot_by_doctor_id(p_doctor_id uuid)
 returns jsonb
 language plpgsql
 as $$
